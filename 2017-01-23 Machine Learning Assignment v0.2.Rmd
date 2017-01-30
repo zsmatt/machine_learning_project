@@ -1,0 +1,91 @@
+---
+title: "Practical Machine Learning - Course Project"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(randomForest)
+library(parallel)
+library(doParallel)
+library(dplyr)
+```
+
+## Executive Summary
+
+I fitted a random forest to this data with very good results and resulting high prediction accuracy.  I used only the subset of predictors for which there was complete information and fitted with 75% of the dataset reserving 25% as a test set.  The model reports an average out of bag accuracy across resampling of over 99.5% and classifies over 99.9% of my testing holdout correctly.  It also leads us to the conclusion that the num_window variable is fully predictive of the classe. Assuming the records in the provided test set do not break this relationship, we can expect full accuracy of the prediction part of the exercise.
+
+## Part 1: Loading and Data Exploration
+
+I began by loading the data and doing some exploratory checks.  There are a lot of potential predictors in this data set, so instead of spending a lot of time on the distributions of each I wanted to start by understanding which might be most useful.  I did have to fix one major data issue, which was a number of predictors with very high rates of null values some of which loaded as factors.  I won't show the data summaries and other data exploration for space reasons.
+
+I also split the 'training' data into a training and testing dataset so that I could test my model.  The testing dataset provided for the exercise, called pml_testing, is not useful for this as the correct classes are not provided.
+
+```{r data load and exploration}
+pml_training <- read.csv('pml-training.csv', na.strings=c("NA", "", "#DIV/0!"))
+pml_testing <- read.csv('pml-testing.csv', na.strings=c("NA", "", "#DIV/0!"))
+
+set.seed(1234)
+inTrain <- createDataPartition(pml_training$classe, p=0.75)[[1]]
+training <- pml_training[inTrain, ]
+testing <- pml_training[-inTrain, ]
+```
+
+```{r good predictors}
+training <- training[, -c(1, 3, 4, 5)]
+training <- training[, colSums(is.na(training)) < (nrow(training) * 0.2)]
+
+testing <- testing[, names(training)]
+```
+
+## Part 2: Random Forest
+
+For my modeling, I started with a random forest.  It's a model I'm familiar with and was covered in this class.  It's also pretty good (well better than some other choices) when you have many predictors of unknown quality and distributions.  Since this is a random forest, it takes care of the cross validation for us by using multiple bootstrapped samples and calculating the out of bag error.  With the defaults, each bootstrapped sample will have as many records as the input dataset but will not contain all of the unique records (instead containing some records multiple times) allowing for the out of bag testing.
+
+This is the code to fit the random forest.  Because the model takes awhile to fit (~30 minutes), I save the result and just load the result in my markdown document to avoid rerunning every time I generate the document.
+
+```{r modeling code, eval=FALSE}
+cl <- makeCluster(4)
+registerDoParallel(cl)
+rfm <- train(classe ~ ., data=training, method="rf")
+stopCluster(cl)
+save(rfm, file="rfm.RData")
+```
+
+Let's load the final model and check the fit quality.  We see that the fit is very good based on out of bag testing against the training set and predicting the testing holdout.  When we check the variable importance, we also see a variable named 'num_window' is very predictive.
+
+```{r accuracy results for training data and holdout}
+load(file="rfm.RData")
+print(rfm)
+confusionMatrix(rfm)
+confusionMatrix(testing$classe, predict(rfm, testing))
+plot(rfm$finalModel, main="Error by # of Trees")
+legend("topright", colnames(rfm$finalModel$err.rate), fill=1:6)
+head(importance(rfm$finalModel)[order(-importance(rfm$finalModel)),], 5)
+```
+
+## Part 3: An important variable
+
+Next I deep dived into the num_window variable.  By finding the number of distinct num_window, classe pairs and the number of distinct num_window values, we prove that in the training set each num_window only has one classe.  If all of the num_window values we want to predict from our testing and pml_testing datasets are in our training set, this will be an easy way to predict!
+
+```{r num_window deep dive}
+nrow(training %>% distinct(num_window, classe))
+nrow(training %>% distinct(num_window))
+nrow(anti_join(testing, training %>% distinct(num_window)))
+nrow(anti_join(pml_testing, training %>% distinct(num_window)))
+```
+
+Predict the values of the testing holdout and the final pml_testing data set with our random forest and compare them to what we'd get using just num_window.
+
+```{r predictions}
+prd_test <- left_join(testing %>% select(num_window), training %>% distinct(num_window, classe))
+table(testing$classe, prd_test$classe)
+
+pml_testing$classe <- NA
+pml_testing <- pml_testing[, names(training)]
+
+prd <- predict(rfm, pml_testing)
+prd2 <- left_join(pml_testing %>% select(num_window), training %>% distinct(num_window, classe))
+table(prd, prd2$classe)
+```
